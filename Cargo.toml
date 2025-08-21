@@ -2,32 +2,13 @@
 name = "solana-metrics"
 description = "Solana Metrics"
 documentation = "https://docs.rs/solana-metrics"
-version = { workspace = true }
-authors = { workspace = true }
-repository = { workspace = true }
-homepage = { workspace = true }
-license = { workspace = true }
-edition = { workspace = true }
+version = "2.1.0"
+rust-version = "1.88.0"
+edition = "2021"
 
 [dependencies]
-crossbeam-channel = { workspace = true }
-gethostname = { workspace = true }
-lazy_static = { workspace = true }
-log = { workspace = true }
-reqwest = { workspace = true, features = ["blocking", "brotli", "deflate", "gzip", "rustls-tls", "json"] }
-solana-sdk = { workspace = true }
-thiserror = { workspace = true }
-
-[dev-dependencies]
-env_logger = { workspace = true }
-rand = { workspace = true }
-serial_test = { workspace = true }
-
-[lib]
-name = "solana_metrics"
-
-[[bench]]
-name = "metrics"
-
-[package.metadata.docs.rs]
-targets = ["x86_64-unknown-linux-gnu"]
+crossbeam-channel = "0.5.13"
+lazy_static = "1.5.0"
+solana-sdk = "=2.1.0" # Fetch this from crates.io, instead of the workspace
+thiserror = "1.0.65"
+log = "0.4.22"

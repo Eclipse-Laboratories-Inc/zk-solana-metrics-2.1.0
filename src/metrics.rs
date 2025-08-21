@@ -3,7 +3,6 @@
 use {
     crate::{counter::CounterPoint, datapoint::DataPoint},
     crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender},
-    gethostname::gethostname,
     lazy_static::lazy_static,
     log::*,
     solana_sdk::{genesis_config::ClusterType, hash::hash},
@@ -15,7 +14,7 @@ use {
         fmt::Write,
         sync::{Arc, Barrier, Mutex, Once, RwLock},
         thread,
-        time::{Duration, Instant, UNIX_EPOCH},
+        time::Duration,
     },
     thiserror::Error,
 };
@@ -26,8 +25,8 @@ type CounterMap = HashMap<(&'static str, u64), CounterPoint>;
 pub enum MetricsError {
     #[error(transparent)]
     VarError(#[from] env::VarError),
-    #[error(transparent)]
-    ReqwestError(#[from] reqwest::Error),
+    #[error("Failed to call Reqwest in zkVM environment")]
+    ReqwestError,
     #[error("SOLANA_METRICS_CONFIG is invalid: '{0}'")]
     ConfigInvalid(String),
     #[error("SOLANA_METRICS_CONFIG is incomplete")]
@@ -45,7 +44,6 @@ impl From<MetricsError> for String {
 impl From<&CounterPoint> for DataPoint {
     fn from(counter_point: &CounterPoint) -> Self {
         let mut point = Self::new(counter_point.name);
-        point.timestamp = counter_point.timestamp;
         point.add_field_i64("count", counter_point.count);
         point
     }
@@ -69,13 +67,13 @@ pub trait MetricsWriter {
 }
 
 struct InfluxDbMetricsWriter {
-    write_url: Option<String>,
+    _write_url: Option<String>,
 }
 
 impl InfluxDbMetricsWriter {
     fn new() -> Self {
         Self {
-            write_url: Self::build_write_url().ok(),
+            _write_url: Self::build_write_url().ok(),
         }
     }
 
@@ -127,46 +125,14 @@ pub fn serialize_points(points: &Vec<DataPoint>, host_id: &str) -> String {
             let _ = write!(line, "{}{}={}", if first { ' ' } else { ',' }, name, value);
             first = false;
         }
-        let timestamp = point.timestamp.duration_since(UNIX_EPOCH);
-        let nanos = timestamp.unwrap().as_nanos();
-        let _ = writeln!(line, " {nanos}");
+        let _ = writeln!(line, " 0");
     }
     line
 }
 
 impl MetricsWriter for InfluxDbMetricsWriter {
-    fn write(&self, points: Vec<DataPoint>) {
-        if let Some(ref write_url) = self.write_url {
-            debug!("submitting {} points", points.len());
-
-            let host_id = HOST_ID.read().unwrap();
-
-            let line = serialize_points(&points, &host_id);
-
-            let client = reqwest::blocking::Client::builder()
-                .timeout(Duration::from_secs(5))
-                .build();
-            let client = match client {
-                Ok(client) => client,
-                Err(err) => {
-                    warn!("client instantiation failed: {}", err);
-                    return;
-                }
-            };
-
-            let response = client.post(write_url.as_str()).body(line).send();
-            if let Ok(resp) = response {
-                let status = resp.status();
-                if !status.is_success() {
-                    let text = resp
-                        .text()
-                        .unwrap_or_else(|_| "[text body empty]".to_string());
-                    warn!("submit response unsuccessful: {} {}", status, text,);
-                }
-            } else {
-                warn!("submit error: {}", response.unwrap_err());
-            }
-        }
+    fn write(&self, _points: Vec<DataPoint>) {
+        // never called.
     }
 }
 
@@ -211,6 +177,7 @@ impl MetricsAgent {
     //
     // `max_points_per_sec` is only used in a warning message.
     // `points_buffered` is used in the stats.
+    #[allow(dead_code)]
     fn combine_points(
         max_points: usize,
         max_points_per_sec: usize,
@@ -260,27 +227,14 @@ impl MetricsAgent {
     // Returns an updated value for `last_write_time`.  Which is equal to `Instant::now()`, just
     // before `write` in updated.
     fn write(
-        writer: &Arc<dyn MetricsWriter + Send + Sync>,
-        max_points: usize,
-        max_points_per_sec: usize,
-        last_write_time: Instant,
-        points_buffered: usize,
-        points: &mut Vec<DataPoint>,
-        counters: &mut CounterMap,
-    ) -> Instant {
-        let now = Instant::now();
-        let secs_since_last_write = now.duration_since(last_write_time).as_secs();
-
-        writer.write(Self::combine_points(
-            max_points,
-            max_points_per_sec,
-            secs_since_last_write,
-            points_buffered,
-            points,
-            counters,
-        ));
-
-        now
+        _writer: &Arc<dyn MetricsWriter + Send + Sync>,
+        _max_points: usize,
+        _max_points_per_sec: usize,
+        // last_write_time: Instant,
+        _points_buffered: usize,
+        _points: &mut Vec<DataPoint>,
+        _counters: &mut CounterMap,
+    ) {
     }
 
     fn run(
@@ -290,22 +244,19 @@ impl MetricsAgent {
         max_points_per_sec: usize,
     ) {
         trace!("run: enter");
-        let mut last_write_time = Instant::now();
         let mut points = Vec::<DataPoint>::new();
         let mut counters = CounterMap::new();
 
         let max_points = write_frequency.as_secs() as usize * max_points_per_sec;
 
         // Bind common arguments in the `Self::write()` call.
-        let write = |last_write_time: Instant,
-                     points: &mut Vec<DataPoint>,
+        let _write = |points: &mut Vec<DataPoint>,
                      counters: &mut CounterMap|
-         -> Instant {
+        -> () {
             Self::write(
                 writer,
                 max_points,
                 max_points_per_sec,
-                last_write_time,
                 receiver.len(),
                 points,
                 counters,
@@ -317,7 +268,6 @@ impl MetricsAgent {
                 Ok(cmd) => match cmd {
                     MetricsCommand::Flush(barrier) => {
                         debug!("metrics_thread: flush");
-                        last_write_time = write(last_write_time, &mut points, &mut counters);
                         barrier.wait();
                     }
                     MetricsCommand::Submit(point, level) => {
@@ -341,10 +291,10 @@ impl MetricsAgent {
                 }
             }
 
-            let now = Instant::now();
-            if now.duration_since(last_write_time) >= write_frequency {
-                last_write_time = write(last_write_time, &mut points, &mut counters);
-            }
+            // let now = Instant::now();
+            // if now.duration_since(last_write_time) >= write_frequency {
+            //     last_write_time = write(last_write_time, &mut points, &mut counters);
+            // }
         }
 
         debug_assert!(
@@ -399,9 +349,7 @@ fn get_singleton_agent() -> &'static MetricsAgent {
 lazy_static! {
     static ref HOST_ID: Arc<RwLock<String>> = {
         Arc::new(RwLock::new({
-            let hostname: String = gethostname()
-                .into_string()
-                .unwrap_or_else(|_| "".to_string());
+            let hostname: String = "risc0-zkvm".to_string();
             format!("{}", hash(hostname.as_bytes()))
         }))
     };
@@ -491,14 +439,12 @@ pub fn metrics_config_sanity_check(cluster_type: ClusterType) -> Result<(), Metr
 
 pub fn query(q: &str) -> Result<String, MetricsError> {
     let config = get_metrics_config()?;
-    let query_url = format!(
+    let _query_url = format!(
         "{}/query?u={}&p={}&q={}",
         &config.host, &config.username, &config.password, &q
     );
 
-    let response = reqwest::blocking::get(query_url.as_str())?.text()?;
-
-    Ok(response)
+    Err(MetricsError::ReqwestError)
 }
 
 /// Blocks until all pending points from previous calls to `submit` have been
